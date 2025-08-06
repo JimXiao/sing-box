@@ -44,6 +44,7 @@ type URLTest struct {
 	idleTimeout                  time.Duration
 	group                        *URLTestGroup
 	interruptExternalConnections bool
+	weights                      map[string]int
 }
 
 func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.URLTestOutboundOptions) (adapter.Outbound, error) {
@@ -60,6 +61,7 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
 		tolerance:                    options.Tolerance,
 		idleTimeout:                  time.Duration(options.IdleTimeout),
 		interruptExternalConnections: options.InterruptExistConnections,
+		weights:                      options.Weights,
 	}
 	if len(outbound.tags) == 0 {
 		return nil, E.New("missing tags")
@@ -76,7 +78,7 @@ func (s *URLTest) Start() error {
 		}
 		outbounds = append(outbounds, detour)
 	}
-	group, err := NewURLTestGroup(s.ctx, s.outbound, s.logger, outbounds, s.link, s.interval, s.tolerance, s.idleTimeout, s.interruptExternalConnections)
+	group, err := NewURLTestGroup(s.ctx, s.outbound, s.logger, outbounds, s.link, s.interval, s.tolerance, s.idleTimeout, s.interruptExternalConnections, s.weights)
 	if err != nil {
 		return err
 	}
@@ -193,9 +195,10 @@ type URLTestGroup struct {
 	close                        chan struct{}
 	started                      bool
 	lastActive                   atomic.TypedValue[time.Time]
+	weights                      map[string]int // 新增，tag->权值
 }
 
-func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManager, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, tolerance uint16, idleTimeout time.Duration, interruptExternalConnections bool) (*URLTestGroup, error) {
+func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManager, logger log.Logger, outbounds []adapter.Outbound, link string, interval time.Duration, tolerance uint16, idleTimeout time.Duration, interruptExternalConnections bool, weights map[string]int) (*URLTestGroup, error) {
 	if interval == 0 {
 		interval = C.DefaultURLTestInterval
 	}
@@ -230,6 +233,7 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
 		pause:                        service.FromContext[pause.Manager](ctx),
 		interruptGroup:               interrupt.NewGroup(),
 		interruptExternalConnections: interruptExternalConnections,
+		weights:                      weights, 
 	}, nil
 }
 
@@ -271,6 +275,7 @@ func (g *URLTestGroup) Close() error {
 func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
 	var minDelay uint16
 	var minOutbound adapter.Outbound
+
 	switch network {
 	case N.NetworkTCP:
 		if g.selectedOutboundTCP != nil {
@@ -287,6 +292,11 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
 			}
 		}
 	}
+
+	weightsAvailable := g.weights != nil && len(g.weights) > 0
+	allSameWeight := true
+	var lastWeight *int = nil
+	nodeCount := 0
 	for _, detour := range g.outbounds {
 		if !common.Contains(detour.Network(), network) {
 			continue
@@ -295,12 +305,39 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
 		if history == nil {
 			continue
 		}
-		if minDelay == 0 || minDelay > history.Delay+g.tolerance {
-			minDelay = history.Delay
-			minOutbound = detour
+		weight := 0
+		if weightsAvailable {
+			weight = g.weights[detour.Tag()]
 		}
+		if lastWeight == nil {
+			tmp := weight
+			lastWeight = &tmp
+		} else if *lastWeight != weight {
+			allSameWeight = false
+			break
+		}
+		nodeCount++
 	}
-	if minOutbound == nil {
+
+
+	if !weightsAvailable || allSameWeight {
+		for _, detour := range g.outbounds {
+			if !common.Contains(detour.Network(), network) {
+				continue
+			}
+			history := g.history.LoadURLTestHistory(RealTag(detour))
+			if history == nil {
+				continue
+			}
+
+			if minOutbound == nil || minDelay > history.Delay+g.tolerance {
+				minDelay = history.Delay
+				minOutbound = detour
+			}
+		}
+		if minOutbound != nil {
+			return minOutbound, true
+		}
 		for _, detour := range g.outbounds {
 			if !common.Contains(detour.Network(), network) {
 				continue
@@ -309,7 +346,52 @@ func (g *URLTestGroup) Select(network string) (adapter.Outbound, bool) {
 		}
 		return nil, false
 	}
-	return minOutbound, true
+
+	maxWeight := -1
+	var candidates []struct {
+		detour adapter.Outbound
+		delay  uint16
+	}
+	for _, detour := range g.outbounds {
+		if !common.Contains(detour.Network(), network) {
+			continue
+		}
+		history := g.history.LoadURLTestHistory(RealTag(detour))
+		if history == nil {
+			continue
+		}
+		weight := g.weights[detour.Tag()]
+		if weight > maxWeight {
+			maxWeight = weight
+			candidates = []struct {
+				detour adapter.Outbound
+				delay  uint16
+			}{{detour, history.Delay}}
+		} else if weight == maxWeight {
+			candidates = append(candidates, struct {
+				detour adapter.Outbound
+				delay  uint16
+			}{detour, history.Delay})
+		}
+	}
+
+	best := candidates[0]
+	for _, c := range candidates {
+		if best.detour == nil || best.delay > c.delay+g.tolerance {
+			best = c
+		}
+	}
+	if best.detour != nil {
+		return best.detour, true
+	}
+
+	for _, detour := range g.outbounds {
+		if !common.Contains(detour.Network(), network) {
+			continue
+		}
+		return detour, false
+	}
+	return nil, false
 }
 
 func (g *URLTestGroup) loopCheck() {
