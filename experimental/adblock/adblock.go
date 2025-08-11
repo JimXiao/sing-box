@@ -40,7 +40,8 @@ var once sync.Once
 
 func Instance(logger log.ContextLogger, router *dns.Router, config *option.AdblockOption) *AdBlockManager {
 	once.Do(func() {
-		singleton = &AdBlockManager{logger: logger}
+		singleton = &AdBlockManager{}
+		singleton.logger = logger
 		singleton.ctx, singleton.cancel = context.WithCancel(context.Background())
 		singleton.dnsRouter = router
 		singleton.config = config
@@ -48,12 +49,20 @@ func Instance(logger log.ContextLogger, router *dns.Router, config *option.Adblo
 	return singleton
 }
 
-func Start() {
+func Start(logger log.ContextLogger) {
+	logger.Info("[adBlock] Start called")
 	if singleton == nil {
+		logger.Info("[adBlock] Singleton nil return")
 		return
 	}
+	if logger !=nil {
+		singleton.logger.Info("[adBlock] origin logger1", singleton.logger == nil)
+		singleton.logger = logger
+		singleton.logger.Info("[adBlock] origin logger2", singleton.logger == nil)
+	}
+	logger.Info("[adBlock] To Start adblock ")
 	singleton.Start()
-}
+}	
 
 func Stop() {
 	if singleton == nil {
@@ -67,10 +76,8 @@ func (m *AdBlockManager) Start() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.running {
-		m.logger.Info("[adBlock] already running, restarting...")
-		if m.cancel != nil {
-			m.cancel()
-		}
+		m.logger.Info("[adBlock] already running, return...")
+		return
 	}
 	m.logger.Info("[adBlock] Starting loop")
 	m.ctx, m.cancel = context.WithCancel(context.Background())
@@ -108,19 +115,10 @@ func (m *AdBlockManager) loop() {
 }
 
 func RegisterToRouter(logger log.ContextLogger, router *dns.Router, config *option.AdblockOption) {
+	logger.Info("[adBlock] Trying to Instance AdblockManager ")
 	Instance(logger, router, config)
-	Start()
+	Start(logger)
 }
-
-// func (m *AdBlockManager) getNewDnsServer() option.DNSServerOptions {
-// 	return option.DNSServerOptions{
-// 		Tag:  adBlockDefaultTag,
-// 		Type: "address",
-// 		Options: &option.LegacyDNSServerOptions{
-// 			Address: "0.0.0.0",
-// 		},
-// 	}
-// }
 
 func (m *AdBlockManager) getNewDnsRules() option.DNSRule {
 	rc := option.DNSRCode(dns.RcodeNameError)
@@ -153,7 +151,7 @@ func (m *AdBlockManager) pull() {
 		} else {
 			requestUrl = fmt.Sprintf("%s?md5=%s", requestUrl, m.lastMD5)
 		}
-		m.logger.Debug("[adBlock] Trying to pull adblock list from: ", requestUrl)
+		m.logger.Info("[adBlock] Trying to pull adblock list from: ", requestUrl)
 		client := &http.Client{
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				if len(via) > 0 {
@@ -161,7 +159,7 @@ func (m *AdBlockManager) pull() {
 				}
 				return nil
 			},
-		}
+		}	
 
 		resp, err := client.Get(requestUrl)
 		if err != nil {
@@ -195,7 +193,7 @@ func (m *AdBlockManager) pull() {
 	sum := md5.Sum(body)
 	newMD5 := hex.EncodeToString(sum[:])
 	if newMD5 == m.lastMD5 {
-		m.logger.Debug("[adBlock] adblock list not changed (MD5 matched)")
+		m.logger.Info("[adBlock] adblock list not changed (MD5 matched)")
 		return
 	}
 
@@ -216,12 +214,12 @@ func (m *AdBlockManager) pull() {
 		m.logger.Info("[adBlock] Injecting new domains into live dnsRouter")
 		m.hijackAdBlockDomainsToRouter()
 	} else {
-		m.logger.Warn("[adBlock] DNSRouter not available or is not enable, skipping live injection")
+		m.logger.Info("[adBlock] DNSRouter not available or is not enable, skipping live injection")
 	}
 }
 
 func (m *AdBlockManager) printDomainPreview(domains []string) {
-	const previewCount = 100
+	const previewCount = 10
 	n := len(domains)
 	if n == 0 {
 		m.logger.Info("[domain debug] domain list is empty")
