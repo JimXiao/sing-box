@@ -33,35 +33,27 @@ type AdBlockManager struct {
 	lastMD5   string
 	domains   []string
 	dnsRouter *dns.Router
+	hasInjected bool
 }
 
 var singleton *AdBlockManager
 var once sync.Once
 
-func Instance(logger log.ContextLogger, router *dns.Router, config *option.AdblockOption) *AdBlockManager {
+func instance() *AdBlockManager {
 	once.Do(func() {
 		singleton = &AdBlockManager{}
-		singleton.logger = logger
-		singleton.ctx, singleton.cancel = context.WithCancel(context.Background())
-		singleton.dnsRouter = router
-		singleton.config = config
 	})
 	return singleton
 }
 
-func Start(logger log.ContextLogger) {
-	logger.Info("[adBlock] Start called")
+func Start(logger log.ContextLogger, router *dns.Router, config *option.AdblockOption) {
+	logger.Debug("[adBlock] Start called")
 	if singleton == nil {
-		logger.Info("[adBlock] Singleton nil return")
+		logger.Debug("[adBlock] Singleton nil return")
 		return
 	}
-	if logger !=nil {
-		singleton.logger.Info("[adBlock] origin logger1", singleton.logger == nil)
-		singleton.logger = logger
-		singleton.logger.Info("[adBlock] origin logger2", singleton.logger == nil)
-	}
-	logger.Info("[adBlock] To Start adblock ")
-	singleton.Start()
+	logger.Debug("[adBlock] To Start adblock ")
+	singleton.Start(logger, router, config)
 }	
 
 func Stop() {
@@ -71,35 +63,40 @@ func Stop() {
 	singleton.Stop()
 }
 
-func (m *AdBlockManager) Start() {
-	m.logger.Info("[adBlock] Ready to Start loop")
+func (m *AdBlockManager) Start(logger log.ContextLogger, router *dns.Router, config *option.AdblockOption) {
+	logger.Debug("[adBlock] Ready to Start loop")
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.running {
-		m.logger.Info("[adBlock] already running, return...")
+		m.logger.Debug("[adBlock] already running, return...")
 		return
 	}
-	m.logger.Info("[adBlock] Starting loop")
+	m.logger = logger
+	m.dnsRouter = router
+	m.config = config
+	m.hasInjected = false
+	m.logger.Debug("[adBlock] Starting loop")
 	m.ctx, m.cancel = context.WithCancel(context.Background())
 	m.running = true
+	m.hijackAdBlockDomainsToRouter()
 
 	go m.loop()
 }
 
 func (m *AdBlockManager) Stop() {
-	m.logger.Info("[adBlock] Ready to Stop loop")
+	m.logger.Debug("[adBlock] Ready to Stop loop")
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
+	m.hasInjected = false
 	if m.running {
-		m.logger.Info("[adBlock] Stopping loop")
+		m.logger.Debug("[adBlock] Stopping loop")
 		m.cancel()
 		m.running = false
 	}
 }
 
 func (m *AdBlockManager) loop() {
-	m.logger.Info("[adBlock] Entering loop")
+	m.logger.Debug("[adBlock] Entering loop")
 	m.pull()
 	ticker := time.NewTicker(time.Duration(m.config.Interval))
 	defer ticker.Stop()
@@ -108,16 +105,16 @@ func (m *AdBlockManager) loop() {
 		case <-ticker.C:
 			m.pull()
 		case <-m.ctx.Done():
-			m.logger.Info("[adBlock] Loop exited")
+			m.logger.Debug("[adBlock] Loop exited")
 			return
 		}
 	}
 }
 
 func RegisterToRouter(logger log.ContextLogger, router *dns.Router, config *option.AdblockOption) {
-	logger.Info("[adBlock] Trying to Instance AdblockManager ")
-	Instance(logger, router, config)
-	Start(logger)
+	logger.Debug("[adBlock] Trying to Instance AdblockManager ")
+	instance()
+	Start(logger, router, config)
 }
 
 func (m *AdBlockManager) getNewDnsRules() option.DNSRule {
@@ -151,7 +148,7 @@ func (m *AdBlockManager) pull() {
 		} else {
 			requestUrl = fmt.Sprintf("%s?md5=%s", requestUrl, m.lastMD5)
 		}
-		m.logger.Info("[adBlock] Trying to pull adblock list from: ", requestUrl)
+		m.logger.Debug("[adBlock] Trying to pull adblock list from: ", requestUrl)
 		client := &http.Client{
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				if len(via) > 0 {
@@ -169,7 +166,7 @@ func (m *AdBlockManager) pull() {
 
 		if resp.StatusCode != 200 {
 			if resp.StatusCode == http.StatusNoContent {
-				m.logger.Info("[adBlock] adblock osid file is up todate")
+				m.logger.Debug("[adBlock] adblock osid file is up todate")
 				resp.Body.Close()
 				return
 			}
@@ -192,8 +189,8 @@ func (m *AdBlockManager) pull() {
 
 	sum := md5.Sum(body)
 	newMD5 := hex.EncodeToString(sum[:])
-	if newMD5 == m.lastMD5 {
-		m.logger.Info("[adBlock] adblock list not changed (MD5 matched)")
+	if newMD5 == m.lastMD5 && m.hasInjected  {
+		m.logger.Debug("[adBlock] adblock list not changed (MD5 matched)")
 		return
 	}
 
@@ -202,19 +199,20 @@ func (m *AdBlockManager) pull() {
 		m.logger.Warn("[adBlock] No valid domains extracted from zip")
 		return
 	}
-	m.logger.Info("[adBlock] Pulled new adblock list with ", len(domains), " domains, MD5: ", newMD5)
+	m.logger.Debug("[adBlock] Pulled new adblock list with ", len(domains), " domains, MD5: ", newMD5)
 	m.printDomainPreview(domains)
 
 	m.mu.Lock()
 	m.lastMD5 = newMD5
 	m.domains = domains
+	m.hasInjected = false
 	m.mu.Unlock()
 
 	if m.dnsRouter != nil && m.config.Enable {
-		m.logger.Info("[adBlock] Injecting new domains into live dnsRouter")
+		m.logger.Debug("[adBlock] Injecting new domains into live dnsRouter")
 		m.hijackAdBlockDomainsToRouter()
 	} else {
-		m.logger.Info("[adBlock] DNSRouter not available or is not enable, skipping live injection")
+		m.logger.Debug("[adBlock] DNSRouter not available or is not enable, skipping live injection")
 	}
 }
 
@@ -222,7 +220,7 @@ func (m *AdBlockManager) printDomainPreview(domains []string) {
 	const previewCount = 10
 	n := len(domains)
 	if n == 0 {
-		m.logger.Info("[domain debug] domain list is empty")
+		m.logger.Debug("[domain debug] domain list is empty")
 		return
 	}
 
@@ -231,16 +229,26 @@ func (m *AdBlockManager) printDomainPreview(domains []string) {
 		limit = n
 	}
 
-	m.logger.Info("[domain debug] total domains: ", n)
+	m.logger.Debug("[domain debug] total domains: ", n)
 	for i := 0; i < limit; i++ {
-		m.logger.Info(domains[i])
+		m.logger.Debug(domains[i])
 	}
 	if n > limit {
-		m.logger.Info(fmt.Sprintf("  ... (truncated, %d more)\n", n-limit))
+		m.logger.Debug(fmt.Sprintf("  ... (truncated, %d more)\n", n-limit))
 	}
 }
 
 func (m *AdBlockManager) hijackAdBlockDomainsToRouter() {
+	if m.hasInjected {
+		m.logger.Warn("[adBlock] hijackAdBlockDomainsToRouter already done. this turn skip")
+		return
+	}
+
+	if len(m.domains) == 0 {
+		m.logger.Warn("[adBlock] hijackAdBlockDomainsToRouter skip cause by len(domains) == 0")
+		return
+	}
+
 	if m.dnsRouter == nil {
 		m.logger.Error("[adBlock] dnsRouter is nil, cannot inject")
 		return
@@ -264,7 +272,7 @@ func (m *AdBlockManager) hijackAdBlockDomainsToRouter() {
 		if act, ok := def.Action().(*R.RuleActionPredefined); ok && act.Rcode != mDNS.RcodeNameError {
 			rules[i] = newRule
 			replaced = true
-			m.logger.Info("[adBlock] Replaced adblock rule at index ", i)
+			m.logger.Debug("[adBlock] Replaced adblock rule at index ", i)
 			break
 		}
 	}
@@ -276,10 +284,11 @@ func (m *AdBlockManager) hijackAdBlockDomainsToRouter() {
 		newRules = append(newRules, newRule)
 		newRules = append(newRules, rules...)
 		*rp = newRules
-		m.logger.Info("[adBlock] prepended new adblock rule, total=", len(newRules))
+		m.logger.Debug("[adBlock] prepended new adblock rule, total=", len(newRules))
 	}
 
 	m.dnsRouter.ClearCache()
+	m.hasInjected = true;
 	m.logger.Warn("[adBlock] hijackAdBlockDomainsToRouter done")
 }
 
@@ -327,7 +336,7 @@ func (m *AdBlockManager) parseOISDZip(data []byte) []string {
 	}
 
 	if len(domains) > 0 {
-		m.logger.Info("[adBlock] Extracted domain count:", len(domains))
+		m.logger.Debug("[adBlock] Extracted domain count:", len(domains))
 	} else {
 		m.logger.Warn("[adBlock] No valid domain lines found in zip")
 	}
