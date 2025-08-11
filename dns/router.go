@@ -468,3 +468,11 @@ func (r *Router) ResetNetwork() {
 		transport.Close()
 	}
 }
+
+func (r *Router) GetRules() *[]adapter.DNSRule{
+	return &r.rules
+}
+
+func (r *Router) GetTransport() *adapter.DNSTransportManager {
+	return &r.transport
+}

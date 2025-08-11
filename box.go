@@ -21,6 +21,7 @@ import (
 	"github.com/sagernet/sing-box/dns"
 	"github.com/sagernet/sing-box/dns/transport/local"
 	"github.com/sagernet/sing-box/experimental"
+	"github.com/sagernet/sing-box/experimental/adblock"
 	"github.com/sagernet/sing-box/experimental/cachefile"
 	"github.com/sagernet/sing-box/experimental/libbox/platform"
 	"github.com/sagernet/sing-box/log"
@@ -130,6 +131,7 @@ func New(options Options) (*Box, error) {
 	var needCacheFile bool
 	var needClashAPI bool
 	var needV2RayAPI bool
+	var needAdBlock bool
 	if experimentalOptions.CacheFile != nil && experimentalOptions.CacheFile.Enabled || options.PlatformLogWriter != nil {
 		needCacheFile = true
 	}
@@ -139,6 +141,10 @@ func New(options Options) (*Box, error) {
 	if experimentalOptions.V2RayAPI != nil && experimentalOptions.V2RayAPI.Listen != "" {
 		needV2RayAPI = true
 	}
+	if experimentalOptions.Adblock != nil && len(experimentalOptions.Adblock.URLs) > 0 {
+		needAdBlock = true
+	}
+
 	platformInterface := service.FromContext[platform.Interface](ctx)
 	var defaultLogWriter io.Writer
 	if platformInterface != nil {
@@ -363,6 +369,9 @@ func New(options Options) (*Box, error) {
 			service.MustRegister[adapter.V2RayServer](ctx, v2rayServer)
 		}
 	}
+	if needAdBlock {
+		adblock.RegisterToRouter(logFactory.NewLogger("adBlock"), dnsRouter, experimentalOptions.Adblock)
+	}
 	if ntpOptions.Enabled {
 		ntpDialer, err := dialer.New(ctx, ntpOptions.DialerOptions, ntpOptions.ServerIsDomain())
 		if err != nil {
@@ -508,6 +517,7 @@ func (s *Box) Close() error {
 	err = E.Append(err, s.logFactory.Close(), func(err error) error {
 		return E.Cause(err, "close logger")
 	})
+	adblock.Stop()
 	return err
 }
 

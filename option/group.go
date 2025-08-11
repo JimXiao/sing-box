@@ -15,5 +15,5 @@ type URLTestOutboundOptions struct {
 	Tolerance                 uint16             `json:"tolerance,omitempty"`
 	IdleTimeout               badoption.Duration `json:"idle_timeout,omitempty"`
 	InterruptExistConnections bool               `json:"interrupt_exist_connections,omitempty"`
-	Weights    map[string]int   `json:"weights"`
+	Weights    				  map[string]int   	 `json:"weights,omitempty"`
 }
